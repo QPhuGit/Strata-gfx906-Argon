@@ -605,7 +605,13 @@ void gu_rows_nt(int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n
         case 5: gu_rows<TY, 5, EX>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 6: gu_rows<TY, 6, EX>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 7: gu_rows<TY, 7, EX>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        default: gu_rows<TY, 8, EX>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 8: gu_rows<TY, 8, EX>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        default:
+            for (int t0 = 0; t0 < nt; t0 += 8) {
+                const int k = nt - t0 < 8 ? nt - t0 : 8;
+                gu_rows_nt<TY, EX>(k, blob, gu_row, up_off, n, act + t0, ff + t0, r0, r1);
+            }
+            break;
     }
 }
 
@@ -643,10 +649,7 @@ void gu_type(int type, int nt, const uint8_t* blob, size_t gu_row, size_t up_off
         case 16: gu_rows_nt<16, EX>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 17: gu_rows_nt<17, EX>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 18: gu_rows_nt<G ? 118 : 18, EX>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 21:
-            if (nt <= 3) gu_rows_nt<121, EX>(nt, blob, gu_row, up_off, n, act, ff, r0, r1);
-            else         gu_rows_nt<21, EX>(nt, blob, gu_row, up_off, n, act, ff, r0, r1);
-            break;
+        case 21: gu_rows_nt<G ? 121 : 21, EX>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 22: gu_rows_nt<G ? 122 : 22, EX>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 23: gu_rows_nt<23, EX>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 29: gu_rows_nt<29, EX>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
@@ -661,10 +664,7 @@ void dot_type(int type, int nt, const uint8_t* w, size_t row_bytes, int n, const
         case 16: dot_rows_nt<16, EX>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 17: dot_rows_nt<17, EX>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 18: dot_rows_nt<G ? 118 : 18, EX>(nt, w, row_bytes, n, act, out, r0, r1); break;
-        case 21:
-            if (nt <= 3) dot_rows_nt<121, EX>(nt, w, row_bytes, n, act, out, r0, r1);
-            else         dot_rows_nt<21, EX>(nt, w, row_bytes, n, act, out, r0, r1);
-            break;
+        case 21: dot_rows_nt<G ? 121 : 21, EX>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 22: dot_rows_nt<G ? 122 : 22, EX>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 23: dot_rows_nt<23, EX>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 29: dot_rows_nt<29, EX>(nt, w, row_bytes, n, act, out, r0, r1); break;

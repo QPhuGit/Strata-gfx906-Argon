@@ -431,7 +431,7 @@ bool device_is_sm75() {
 }
 
 bool fuse_wait_on() {
-#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
+#if defined(STRATA_USE_HIP)
     static const int env = [] {
         const char* v = std::getenv("STRATA_FUSE_WAIT");
         return v != nullptr ? (std::atoi(v) != 0 ? 1 : 0) : -1;

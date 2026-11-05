@@ -558,7 +558,7 @@ void iq256x_rows(int type, const uint8_t* w, size_t row_bytes, int n, const void
 
 void iq4nl256_down_rows_v(int variant, const uint8_t* w, size_t row_bytes, int n, const void* const* hq, int nt,
                           float* const* out, int r0, int r1) {
-    const block_q8_0* y[8];
+    const block_q8_0* y[16];
     for (int t = 0; t < nt; ++t) y[t] = (const block_q8_0*) hq[t];
 #if STRATA_AVXVNNI
     if (variant & kIq256Vnni) {

@@ -354,7 +354,7 @@ int native_gu_mt_min(int gu_type) {
     // can depend on how many drafts a verify window held.  STRATA_IQ_MT_MIN=1 (opt-in, 0.1.30) uses the multi-token
     // kernels for every group: output independent of the drafting, at a measured -1..-3% decode on IQ3_S (AVX-512).
     static const char* env = std::getenv("STRATA_IQ_MT_MIN");
-    static const int mt_min = env ? std::atoi(env) : 2;
+    static const int mt_min = env ? std::atoi(env) : (cpu_avx2_ok() && !cpu_avx512_ok() ? 1 : 2);
     // IQ3_S where the AVX-2 kernel gathers its grid (cpu_gather_fast, unless STRATA_IQ256_GATHER=0) on a CPU without
     // AVX-512: there that kernel beats ggml's dot for ONE token too (14900KF P-core, an expert's gate/up rows: 0.34 ->
     // 0.19 ms; its E-cores, which keep the scalar decode: 0.71 -> 0.68), and in decode most CPU experts serve one token
@@ -526,7 +526,7 @@ void native_down_rows_impl(const NativeFmt& f, const uint8_t* blob, const void* 
     static const int mt_min = [] {
         if (const char* e = std::getenv("STRATA_IQ_MT_MIN")) return std::atoi(e);
         const char* mt1 = std::getenv("STRATA_CPU_MT1");
-        if (mt1 != nullptr && mt1[0] == '1' && cpu_avx2_ok() && !cpu_avx512_ok()) return 1;
+        if ((mt1 == nullptr || mt1[0] != '0') && cpu_avx2_ok() && !cpu_avx512_ok()) return 1;
         return 2;
     }();
     static const bool kq = [] { const char* v = std::getenv("STRATA_KQ256"); return v != nullptr && std::atoi(v) != 0; }();
