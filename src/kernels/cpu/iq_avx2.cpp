@@ -208,7 +208,7 @@ template <> struct Fmt32<16> {   // IQ2_XXS: d, qs[32] u16
                               (long long) iq2xxs_grid[(w0 >> 8) & 255], (long long) iq2xxs_grid[w0 & 255]);
         sgn = _mm256_set_epi64x((long long) even_signs.v[(w1 >> 21) & 127], (long long) even_signs.v[(w1 >> 14) & 127],
                                 (long long) even_signs.v[(w1 >> 7) & 127], (long long) even_signs.v[w1 & 127]);
-        sc = sc32(2 * (int) (w1 >> 28) + 1);
+        sc = scale_vec(scale_vecs.s32[w1 >> 28]);
     }
 };
 
@@ -234,10 +234,11 @@ template <> struct Fmt32<22> {   // IQ2_S: d, qs[64] (32 grid bytes, 32 sign byt
     static constexpr float K = 0.125f;
     static inline void decode(const uint8_t* b, int j, int half, __m256i& g, __m256i& sgn, __m256i& sc) {
         // grid_indices reads 8 index bytes; only the first 4 are this half's (the rest stay inside the block)
-        alignas(16) uint16_t sp[8];
-        grid_indices(b + 2 + 8 * j + 4 * half, hi_spread.iq2s[b[66 + 2 * j + half]], sp);
-        g = _mm256_set_epi64x((long long) iq2s_grid[sp[3]], (long long) iq2s_grid[sp[2]],
-                              (long long) iq2s_grid[sp[1]], (long long) iq2s_grid[sp[0]]);
+        const __m128i v_idx = _mm_unpacklo_epi8(_mm_cvtsi64_si128((long long) u64(b + 2 + 8 * j + 4 * half)),
+                                                _mm_cvtsi64_si128((long long) hi_spread.iq2s[b[66 + 2 * j + half]]));
+        const uint64_t lo64 = (uint64_t) _mm_cvtsi128_si64(v_idx);
+        g = _mm256_set_epi64x((long long) iq2s_grid[lo64 >> 48], (long long) iq2s_grid[(lo64 >> 32) & 0xFFFFu],
+                              (long long) iq2s_grid[(lo64 >> 16) & 0xFFFFu], (long long) iq2s_grid[lo64 & 0xFFFFu]);
         sgn = sgn_vec_at(b + 2 + 32 + 8 * j + 4 * half);
         sc = scale_vec(scale_vecs.s16[b[74 + 2 * j + half]]);
     }
@@ -253,7 +254,7 @@ template <> struct Fmt32<18> {   // IQ3_XXS: d, qs[64] grid bytes, 8 x u32 (4 x 
         const uint32_t w = u32(b + 2 + 64 + 8 * j + 4 * half);
         sgn = _mm256_set_epi64x((long long) even_signs.v[(w >> 21) & 127], (long long) even_signs.v[(w >> 14) & 127],
                                 (long long) even_signs.v[(w >> 7) & 127], (long long) even_signs.v[w & 127]);
-        sc = sc32(2 * (int) (w >> 28) + 1);
+        sc = scale_vec(scale_vecs.s32[w >> 28]);
     }
 };
 
@@ -263,11 +264,14 @@ template <> struct Fmt32<21> {   // IQ3_S: d, qs[64], qh[8], signs[32], scales[4
     static inline void decode(const uint8_t* b, int j, int half, __m256i& g, __m256i& sgn, __m256i& sc) {
         const uint8_t* q = b + 2 + 16 * j + 8 * half;
         const uint32_t h = b[66 + 2 * j + half];
-        alignas(16) uint16_t sp[8];
-        grid_indices(q, hi_spread.iq3s[h], sp);
-#define G3(k) (int) iq3s_grid[sp[k]]
-        g = _mm256_set_epi32(G3(7), G3(6), G3(5), G3(4), G3(3), G3(2), G3(1), G3(0));
-#undef G3
+        const __m128i v_idx = _mm_unpacklo_epi8(_mm_cvtsi64_si128((long long) u64(q)),
+                                                _mm_cvtsi64_si128((long long) hi_spread.iq3s[h]));
+        const uint64_t lo64 = (uint64_t) _mm_cvtsi128_si64(v_idx);
+        const uint64_t hi64 = (uint64_t) _mm_extract_epi64(v_idx, 1);
+        g = _mm256_set_epi32((int) iq3s_grid[hi64 >> 48], (int) iq3s_grid[(hi64 >> 32) & 0xFFFFu],
+                             (int) iq3s_grid[(hi64 >> 16) & 0xFFFFu], (int) iq3s_grid[hi64 & 0xFFFFu],
+                             (int) iq3s_grid[lo64 >> 48], (int) iq3s_grid[(lo64 >> 32) & 0xFFFFu],
+                             (int) iq3s_grid[(lo64 >> 16) & 0xFFFFu], (int) iq3s_grid[lo64 & 0xFFFFu]);
         sgn = sgn_vec_at(b + 74 + 8 * j + 4 * half);
         const uint8_t s = b[106 + j];
         sc = scale_vec(scale_vecs.s32[half ? s >> 4 : s & 15]);
@@ -307,7 +311,7 @@ template <> struct Fmt32<121> {
         g = _mm256_i32gather_epi32((const int*) iq3s_grid, _mm256_or_si256(lo, hb), 4);
         sgn = sgn_half(b + 74 + 8 * j, half);
         const uint8_t s = b[106 + j];
-        sc = sc32(half ? 2 * (s >> 4) + 1 : 2 * (s & 15) + 1);
+        sc = scale_vec(scale_vecs.s32[half ? (s >> 4) : (s & 15)]);
     }
 };
 
@@ -321,7 +325,7 @@ template <> struct Fmt32<118> {
         g = _mm256_i32gather_epi32((const int*) iq3xxs_grid, _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*) q)), 4);
         const uint32_t w = u32(b + 2 + 64 + 8 * j + 4 * half);
         sgn = even_signs4(w);
-        sc = sc32(2 * (int) (w >> 28) + 1);
+        sc = scale_vec(scale_vecs.s32[w >> 28]);
     }
 };
 

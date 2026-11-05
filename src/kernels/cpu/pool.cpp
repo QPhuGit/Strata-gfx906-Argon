@@ -1209,7 +1209,9 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
                 const NodeSync& ns = nsync_[(size_t) s];
                 R = ns.rows; T = ns.tasks; h = ns.h; row0 = ns.row0; j = ci - ns.base;
             }
-            const int64_t g0 = R * j / T, g1 = R * (j + 1) / T;
+            const int64_t grain = (mode_ == 5 && (h & 31) == 0) ? 32 : ((h & 15) == 0 ? 16 : 1);
+            const int64_t chunks = R / grain;
+            const int64_t g0 = (chunks * j / T) * grain, g1 = (chunks * (j + 1) / T) * grain;
             for (int64_t g = g0; g < g1;) {
                 const int e = (int) (g / h), l0 = (int) (g % h);
                 const int l1 = (int) std::min<int64_t>(h, l0 + (g1 - g));
@@ -1320,7 +1322,9 @@ void ExpertPool::run_split(ExpertJob* jobs, int n) {
 }
 
 int ExpertPool::phase_tasks(int64_t rows) const {
-    return tasks_ == 0 ? 3 * (n_ + (host_works_ ? 1 : 0)) : (int) (std::min)(rows, (int64_t) tasks_);
+    const int64_t max_non_empty = (std::max)((int64_t) 1, rows / 32);
+    const int64_t want = tasks_ == 0 ? (int64_t) 3 * (n_ + (host_works_ ? 1 : 0)) : (int64_t) tasks_;
+    return (int) (std::min)(max_non_empty, want);
 }
 
 void ExpertPool::run_split_multi(ExpertJobMulti* jobs, int n) {

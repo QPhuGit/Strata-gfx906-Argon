@@ -130,6 +130,13 @@ template <typename T> inline hipError_t strata_host_alloc(T** p, size_t bytes, u
 #define cudaHostGetDevicePointer hipHostGetDevicePointer
 #define cudaStreamCreate hipStreamCreate
 #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
+#ifndef cudaDeviceGetStreamPriorityRange
+#define cudaDeviceGetStreamPriorityRange hipDeviceGetStreamPriorityRange
+#endif
+#ifndef cudaStreamCreateWithPriority
+#define cudaStreamCreateWithPriority hipStreamCreateWithPriority
+#endif
+
 #define cudaStreamDestroy hipStreamDestroy
 #define cudaStreamSynchronize hipStreamSynchronize
 #define cudaStreamQuery hipStreamQuery
@@ -231,18 +238,23 @@ static __device__ __forceinline__ void strata_nanosleep(unsigned int ns) {
 
 // __dp4a(a, b, c): signed 8-bit dot product plus accumulator; gfx906 has v_dot4_i32_i8.
 static __device__ __forceinline__ int strata_dp4a(int a, int b, int c) {
-#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) || defined(__GFX11__) || defined(__GFX12__)
-    return __builtin_amdgcn_sdot4(a, b, c, false);
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__)) && __has_builtin(__builtin_amdgcn_sdot4)
+    return __builtin_amdgcn_sdot4(a, b, c, false); // Phát sinh trực tiếp lệnh v_dot4_i32_i8
 #else
-    const int8_t* va = reinterpret_cast<const int8_t*>(&a);
-    const int8_t* vb = reinterpret_cast<const int8_t*>(&b);
-    return c + va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2] + va[3] * vb[3];
+    const int8_t* pa = reinterpret_cast<const int8_t*>(&a);
+    const int8_t* pb = reinterpret_cast<const int8_t*>(&b);
+    return c + int(pa[0]) * int(pb[0]) + int(pa[1]) * int(pb[1])
+             + int(pa[2]) * int(pb[2]) + int(pa[3]) * int(pb[3]);
 #endif
 }
 static __device__ __forceinline__ unsigned int strata_dp4a(unsigned int a, unsigned int b, unsigned int c) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__)) && __has_builtin(__builtin_amdgcn_udot4)
+    return __builtin_amdgcn_udot4(a, b, c, false); // v_dot4_u32_u8
+#else
     const uint8_t* va = reinterpret_cast<const uint8_t*>(&a);
     const uint8_t* vb = reinterpret_cast<const uint8_t*>(&b);
     return c + va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2] + va[3] * vb[3];
+#endif
 }
 #define __dp4a strata_dp4a
 

@@ -386,8 +386,15 @@ __global__ void gdn_conv_l2_kernel(const float* __restrict__ hist, const float* 
             // gdn_l2_kernel as the compiler built it: the first xor step adds the partner's rounded square to an
             // unrounded own one (an fma), the other steps are plain adds - spelled out so no contraction can differ
             float sq = __fmaf_rn(v, v, __shfl_xor_sync(0xffffffffu, __fmul_rn(v, v), 16));
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+            sq = __fadd_rn(sq, __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(sq), 0x128, 0xf, 0xf, false)));
+            sq = __fadd_rn(sq, __shfl_xor_sync(0xffffffffu, sq, 4));
+            sq = __fadd_rn(sq, __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(sq), 0x4E,  0xf, 0xf, false)));
+            sq = __fadd_rn(sq, __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(sq), 0xB1,  0xf, 0xf, false)));
+#else
 #pragma unroll
             for (int o = 8; o > 0; o >>= 1) sq = __fadd_rn(sq, __shfl_xor_sync(0xffffffffu, sq, o));
+#endif
             if ((threadIdx.x & 31) == 0) part[j][threadIdx.x >> 5] = sq;
         }
         __syncthreads();
@@ -2901,7 +2908,14 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
     if (serial || T <= CONV_TILE) {
         gdn_conv_kernel<<<C / 128, 128, 0, (cudaStream_t) stream>>>(history, qkv, conv_w, h, T);
     } else {
-        static const int fused_mode = [] { const char* v = std::getenv("STRATA_GDN_CONVL2"); return v ? std::atoi(v) : 0; }();
+        static const int fused_mode = [] {
+            const char* v = std::getenv("STRATA_GDN_CONVL2");
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+            return (v == nullptr || v[0] == '\0') ? 1 : std::atoi(v);
+#else
+            return v ? std::atoi(v) : 0;
+#endif
+        }();
         const bool fused = fused_mode != 0;
         if (fused_mode >= 2) {
             gdn_conv_w_kernel<<<dim3(C / 128, (unsigned) ((T + 4 * CONVW_TOK - 1) / (4 * CONVW_TOK))), 128, 0,
@@ -2964,7 +2978,14 @@ static void gdn_recurrence_impl(int variant, float* state, const float* h, const
     }
     if (variant == 1) {
         if (T > 0) {
-            static const int pp = [] { const char* v = std::getenv("STRATA_GDN_PP"); return v ? std::atoi(v) : 0; }();
+            static const int pp = [] {
+                const char* v = std::getenv("STRATA_GDN_PP");
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+                return v ? std::atoi(v) : 2;
+#else
+                return v ? std::atoi(v) : 0;
+#endif
+            }();
             if (pp == 2)
                 gdn_rec_quad2c_kernel<<<HV * (S / C2CB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
             else if (pp)
@@ -3131,7 +3152,14 @@ void gdn_recurrence(float* state, const float* h, const float* gate, const float
     // Aurora (S23): four lanes per column + the grid-stride norm, the same bits (tests/hip/gdn_rec_head.cpp);
     // STRATA_GDN_HEAD=1 (on by default on gfx1151; off with STRATA_GDN_HEAD=0 or STRATA_GDN_REC_HEADS) takes them
     // (AMD builds only; the arch defaults set STRATA_GDN_HEAD=1 on gfx1151 and leave other cards on the earlier kernels)
-    static const bool head = [] { const char* v = std::getenv("STRATA_GDN_HEAD"); return v != nullptr && std::atoi(v) != 0; }();
+    static const bool head = [] {
+        const char* v = std::getenv("STRATA_GDN_HEAD");
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+        return v == nullptr || v[0] == '\0' || std::atoi(v) != 0;
+#else
+        return v != nullptr && std::atoi(v) != 0;
+#endif
+    }();
     static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;
     gdn_recurrence_impl(head && !serial ? 1 : 0, state, h, gate, beta, z, gamma, eps, y, y16, T, stream, ld16, true);
 }

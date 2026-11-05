@@ -13,7 +13,11 @@
 namespace strata::kernels {
 namespace {
 
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+constexpr int JTHREADS = 64;   ///< full Wave64 on gfx906 (100% active lanes along j)
+#else
 constexpr int JTHREADS = 32;   ///< threads along j, the state's fast axis
+#endif
 /// Heads staged per block.  **THIS IS A LATENCY-HIDING KNOB, NOT A CAPACITY ONE, AND IT WAS SET WRONG.**
 ///
 /// The kernel is one thread per `(h, j)` COLUMN of the state, so the thread count is fixed at
@@ -75,18 +79,18 @@ __global__ void gdn_step_kernel(float* __restrict__ state, const float* __restri
         float* col = state + (size_t) h * S + j;        // (S, h_v, S) with j fastest
         const size_t stride = (size_t) h_v * S;
 
-        // pass 1: decay the state and contract it against k.  Decay BEFORE the update - PROPERTY 5.
+        // pass 1: decay the state in register and contract it against k (no redundant intermediate global store).
         float sk = 0.0f;
         for (int i = 0; i < S; ++i) {
-            const float s = col[(size_t) i * stride] * dec;
-            col[(size_t) i * stride] = s;
+            const float s = __fmul_rn(col[(size_t) i * stride], dec);
             sk += s * ks[hi][i];
         }
         const float d = (v[(size_t) h * S + j] - sk) * b;
-        // pass 2: the rank-1 update, then read out against q using the UPDATED state
+        // pass 2: apply decay + rank-1 update and write state to global memory once
         float dot = 0.0f;
         for (int i = 0; i < S; ++i) {
-            const float s = col[(size_t) i * stride] + ks[hi][i] * d;
+            const float s_dec = __fmul_rn(col[(size_t) i * stride], dec);
+            const float s = s_dec + ks[hi][i] * d;
             col[(size_t) i * stride] = s;
             dot += s * qs[hi][i];
         }
@@ -115,37 +119,87 @@ __global__ void gdn_conv_kernel(float* __restrict__ cs, const float* __restrict_
 /// The sum is accumulated in DOUBLE, as `ref/gdn.py` does (`l2_norm(q.astype(np.float64), eps)`), because the
 /// reference deliberately computes this one in float64 and then casts - so matching its precision is part of
 /// transcribing it.
-__global__ void gdn_l2_kernel(float* __restrict__ x, int cols, float eps) {
-    const int row = blockIdx.x;
+constexpr int GDN_NORM_WARPS = 8;
+constexpr int GDN_NORM_THREADS = GDN_NORM_WARPS * 32; // 256 threads = 4 full Wave64 wavefronts per block
+
+__global__ void __launch_bounds__(GDN_NORM_THREADS)
+gdn_l2_kernel(float* __restrict__ x, int rows, int cols, float eps) {
+    const int row = (int) blockIdx.x * GDN_NORM_WARPS + (int) (threadIdx.x >> 5);
+    if (row >= rows) return;
+    const int lane = (int) (threadIdx.x & 31);
     float* p = x + (size_t) row * cols;
-    double acc = 0.0;
-    for (int i = threadIdx.x; i < cols; i += blockDim.x) acc += (double) p[i] * (double) p[i];
-    // warp reduction
-    for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xFFFFFFFFu, acc, off);
-    __shared__ double ssum;
-    if (threadIdx.x == 0) ssum = acc;
-    __syncthreads();
-    const float inv = (float) (1.0 / sqrt(ssum + (double) eps));
-    for (int i = threadIdx.x; i < cols; i += blockDim.x) p[i] *= inv;
+
+    if (cols == 128) {
+        const float v0 = p[lane + 0];
+        const float v1 = p[lane + 32];
+        const float v2 = p[lane + 64];
+        const float v3 = p[lane + 96];
+        double acc = (double) v0 * (double) v0;
+        acc += (double) v1 * (double) v1;
+        acc += (double) v2 * (double) v2;
+        acc += (double) v3 * (double) v3;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xFFFFFFFFu, acc, off, 32);
+        float inv = 0.0f;
+        if (lane == 0) inv = (float) (1.0 / sqrt(acc + (double) eps));
+        inv = __shfl_sync(0xFFFFFFFFu, inv, 0, 32);
+        p[lane + 0]  = v0 * inv;
+        p[lane + 32] = v1 * inv;
+        p[lane + 64] = v2 * inv;
+        p[lane + 96] = v3 * inv;
+    } else {
+        double acc = 0.0;
+        for (int i = lane; i < cols; i += 32) acc += (double) p[i] * (double) p[i];
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xFFFFFFFFu, acc, off, 32);
+        float inv = 0.0f;
+        if (lane == 0) inv = (float) (1.0 / sqrt(acc + (double) eps));
+        inv = __shfl_sync(0xFFFFFFFFu, inv, 0, 32);
+        for (int i = lane; i < cols; i += 32) p[i] *= inv;
+    }
 }
 
-/// y = rms_norm(o, eps) * ssm_norm * sigmoid(z), one warp per head, norm over that head's S values.
-__global__ void gdn_out_norm_kernel(const float* __restrict__ o, const float* __restrict__ z,
-                                    const float* __restrict__ ssm_norm, float* __restrict__ y, int S,
-                                    float eps) {
-    const int h = blockIdx.x;
+/// y = rms_norm(o, eps) * ssm_norm * sigmoid(z), one 32-lane logical warp per head (8 heads per 256-thread block).
+__global__ void __launch_bounds__(GDN_NORM_THREADS)
+gdn_out_norm_kernel(const float* __restrict__ o, const float* __restrict__ z,
+                    const float* __restrict__ ssm_norm, float* __restrict__ y, int h_v, int S,
+                    float eps) {
+    const int h = (int) blockIdx.x * GDN_NORM_WARPS + (int) (threadIdx.x >> 5);
+    if (h >= h_v) return;
+    const int lane = (int) (threadIdx.x & 31);
     const float* po = o + (size_t) h * S;
     const float* pz = z + (size_t) h * S;
     float* py = y + (size_t) h * S;
-    double acc = 0.0;
-    for (int i = threadIdx.x; i < S; i += blockDim.x) acc += (double) po[i] * (double) po[i];
-    for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xFFFFFFFFu, acc, off);
-    __shared__ double ssum;
-    if (threadIdx.x == 0) ssum = acc;
-    __syncthreads();
-    const float inv = (float) (1.0 / sqrt(ssum / (double) S + (double) eps));
-    for (int i = threadIdx.x; i < S; i += blockDim.x)
-        py[i] = po[i] * inv * ssm_norm[i] * sigmoid_f(pz[i]);
+
+    if (S == 128) {
+        const float o0 = po[lane + 0];
+        const float o1 = po[lane + 32];
+        const float o2 = po[lane + 64];
+        const float o3 = po[lane + 96];
+        double acc = (double) o0 * (double) o0;
+        acc += (double) o1 * (double) o1;
+        acc += (double) o2 * (double) o2;
+        acc += (double) o3 * (double) o3;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xFFFFFFFFu, acc, off, 32);
+        float inv = 0.0f;
+        if (lane == 0) inv = (float) (1.0 / sqrt(acc / 128.0 + (double) eps));
+        inv = __shfl_sync(0xFFFFFFFFu, inv, 0, 32);
+        py[lane + 0]  = o0 * inv * ssm_norm[lane + 0]  * sigmoid_f(pz[lane + 0]);
+        py[lane + 32] = o1 * inv * ssm_norm[lane + 32] * sigmoid_f(pz[lane + 32]);
+        py[lane + 64] = o2 * inv * ssm_norm[lane + 64] * sigmoid_f(pz[lane + 64]);
+        py[lane + 96] = o3 * inv * ssm_norm[lane + 96] * sigmoid_f(pz[lane + 96]);
+    } else {
+        double acc = 0.0;
+        for (int i = lane; i < S; i += 32) acc += (double) po[i] * (double) po[i];
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xFFFFFFFFu, acc, off, 32);
+        float inv = 0.0f;
+        if (lane == 0) inv = (float) (1.0 / sqrt(acc / (double) S + (double) eps));
+        inv = __shfl_sync(0xFFFFFFFFu, inv, 0, 32);
+        for (int i = lane; i < S; i += 32)
+            py[i] = po[i] * inv * ssm_norm[i] * sigmoid_f(pz[i]);
+    }
 }
 
 }  // namespace
@@ -192,7 +246,7 @@ void gdn_l2_norm(float* x, int64_t rows, int64_t cols, float eps, void* stream) 
         std::fprintf(stderr, "gdn_l2_norm: cols = %lld exceeds the 1024-wide warp reduction\n", (long long) cols);
         std::exit(1);
     }
-    gdn_l2_kernel<<<(unsigned) rows, 32, 0, (cudaStream_t) stream>>>(x, (int) cols, eps);
+    gdn_l2_kernel<<<(unsigned) ((rows + GDN_NORM_WARPS - 1) / GDN_NORM_WARPS), GDN_NORM_THREADS, 0, (cudaStream_t) stream>>>(x, (int) rows, (int) cols, eps);
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();
         if (e != cudaSuccess) {
@@ -235,7 +289,7 @@ void gdn_beta_gate(float* beta, int64_t h_v, void* stream) {
 void gdn_out_norm(const float* o, const float* z, const float* ssm_norm, float* y, int64_t h_v, int64_t S,
                   float eps, void* stream) {
     if (h_v <= 0 || S <= 0) return;
-    gdn_out_norm_kernel<<<(unsigned) h_v, 32, 0, (cudaStream_t) stream>>>(o, z, ssm_norm, y, (int) S, eps);
+    gdn_out_norm_kernel<<<(unsigned) ((h_v + GDN_NORM_WARPS - 1) / GDN_NORM_WARPS), GDN_NORM_THREADS, 0, (cudaStream_t) stream>>>(o, z, ssm_norm, y, (int) h_v, (int) S, eps);
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();
         if (e != cudaSuccess) {

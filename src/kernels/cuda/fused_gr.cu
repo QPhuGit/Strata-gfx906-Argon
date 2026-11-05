@@ -10,6 +10,9 @@
 #include "strata/core/bw_dense_defaults.hpp"
 #include "strata/kernels/fused_gr.hpp"
 #include "strata/kernels/bf16_bits.hpp"
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+#include "strata/kernels/gfx906_dlops.hpp"
+#endif
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "s26_tsum.cuh"
@@ -49,9 +52,13 @@ constexpr int UP_COLS = 32;                      // columns d per `up` block (x 
 constexpr int UP_BLOCKS = N / UP_COLS;           // 80
 
 __device__ __forceinline__ float warp_sum(float v) {
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+    return strata::kernels::gfx906::wave32_sum_gfx906(v);
+#else
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
     return v;
+#endif
 }
 // warp_sum of 8 independent values at once, token t's total ending in every lane whose bits 4..2 spell t ((lane >> 2) & 7).  The same
 // additions as warp_sum(a[t]) in the same order (offset 16, 8, 4, 2, 1; a + b = b + a, so a lane adding its partner's value to its own gets the
@@ -267,10 +274,19 @@ __device__ __forceinline__ void gr_q8_tail(const GrMulti& m, int d0) {
     const int c0 = (d0 / 32) * 32;
     const float xi = *reinterpret_cast<const volatile float*>(m.a[warp].mixed + c0 + lane);
     float amax = fabsf(xi), sum = xi;
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 16));
+    amax = fmaxf(amax, __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(amax), 0x128, 0xf, 0xf, false)));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 4));
+    amax = fmaxf(amax, __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(amax), 0x4E,  0xf, 0xf, false)));
+    amax = fmaxf(amax, __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(amax), 0xB1,  0xf, 0xf, false)));
+    sum = warp_sum(sum);
+#else
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
+#endif
     const float d = q8_1_finite(q81_div(amax, 127.0f));   // #606: as native_quantize_q8_1_kernel - finite blocks bit for bit
     const int8_t q = q8_1_quant(xi, d, amax);
     GrQ81* y = reinterpret_cast<GrQ81*>(m.a[warp].q8_mixed) + c0 / 32;
@@ -1507,7 +1523,11 @@ namespace {
 bool gr_down_max4() {
     static const bool on = [] {
         const char* v = std::getenv("STRATA_GR_DOWN_MAX4");
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+        return v == nullptr || v[0] == '\0' || std::atoi(v) != 0;
+#else
         return v != nullptr && std::atoi(v) != 0;
+#endif
     }();
     return on;
 }
@@ -1523,7 +1543,10 @@ bool norm_fast_on() {
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) return false;
     if (!per_dev[dev]) {
         cudaDeviceProp p;
-        per_dev[dev] = cudaGetDeviceProperties(&p, dev) == cudaSuccess && strata::kernels::gfx_arch_is_gfx12(p.gcnArchName) ? 2 : 1;
+        const bool ok_arch = cudaGetDeviceProperties(&p, dev) == cudaSuccess &&
+                             (strata::kernels::gfx_arch_is_gfx12(p.gcnArchName) ||
+                              strata::kernels::gfx_arch_is(p.gcnArchName, "gfx906"));
+        per_dev[dev] = ok_arch ? 2 : 1;
     }
     return per_dev[dev] == 2;
 #else
@@ -1819,13 +1842,20 @@ __global__ void __launch_bounds__(THREADS) gr_norm_fast_kernel(GrMulti m) {
 // 4, 2, 1 are shuffles inside the 8 - the same tree, bitwise the same sum, 3 shuffles a token instead of 5 and no
 // idle lanes on the tail chunks.  A block's 64 rows are 2 passes of 32 groups, their weights loaded up front.
 __device__ __forceinline__ float xor8(float v) {
-#pragma unroll
-#if defined(__HIPCC__)
-    for (int o = 4; o > 0; o >>= 1) v += __shfl_xor(v, o, 64);
-#else
-    for (int o = 4; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-#endif
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+    v += __shfl_xor(v, 4, 64);
+    v += __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0x4E, 0xf, 0xf, false)); // quad_perm:[2,3,0,1] == lane ^ 2
+    v += __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0xB1, 0xf, 0xf, false)); // quad_perm:[1,0,3,2] == lane ^ 1
     return v;
+#elif defined(__HIPCC__)
+#pragma unroll
+    for (int o = 4; o > 0; o >>= 1) v += __shfl_xor(v, o, 64);
+    return v;
+#else
+#pragma unroll
+    for (int o = 4; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+    return v;
+#endif
 }
 __global__ void __launch_bounds__(THREADS) gr_up_fast_kernel(GrMulti m) {
     __shared__ __align__(16) float lo[kFusedGrMaxT][LR];
@@ -1942,8 +1972,8 @@ __global__ void __launch_bounds__(GS_WAVES * 64) gr_down_split_kernel(GrMulti m)
     for (int k = 0; k < kFusedGrMaxT; ++k) {
         if (k >= T) break;
         float v = acc[k];
-#pragma unroll
-        for (int off = 32; off > 0; off >>= 1) v += __shfl_xor(v, off, 64);
+        v += __shfl_xor(v, 32, 64);
+        v = warp_sum(v);
         if (lane == 0) part[((size_t) sl * kFusedGrMaxT + k) * GS_ROWS + (inject_block ? LR + row : row)] = v;
     }
 }

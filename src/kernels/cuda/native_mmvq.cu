@@ -455,13 +455,12 @@ __device__ __align__(4) int8_t iq4nl_values[16] = {
 
 __device__ __forceinline__ int2 iq4_table_lookup(int q4) {
 #if defined(STRATA_HIP_GFX906)
-    // AMD: llama.cpp's HIP lookup (see iq_kernels.cu get_int_from_table_16): 4 v_perm_b32 per 8 values
-    const uint32_t* v32 = reinterpret_cast<const uint32_t*>(iq4nl_values);
+    constexpr uint32_t v0 = 0xBFAD9881u, v1 = 0xF6EADDCFu, v2 = 0x26190D01u, v3 = 0x71594535u;
     const uint32_t q_even = (uint32_t) q4, q_odd = (uint32_t) q4 >> 4;
-    const uint32_t el = __builtin_amdgcn_perm(v32[1], v32[0], q_even & 0x07070707u);
-    const uint32_t ol = __builtin_amdgcn_perm(v32[1], v32[0], q_odd & 0x07070707u);
-    const uint32_t eh = __builtin_amdgcn_perm(v32[3], v32[2], q_even & 0x07070707u);
-    const uint32_t oh = __builtin_amdgcn_perm(v32[3], v32[2], q_odd & 0x07070707u);
+    const uint32_t el = __builtin_amdgcn_perm(v1, v0, q_even & 0x07070707u);
+    const uint32_t ol = __builtin_amdgcn_perm(v1, v0, q_odd & 0x07070707u);
+    const uint32_t eh = __builtin_amdgcn_perm(v3, v2, q_even & 0x07070707u);
+    const uint32_t oh = __builtin_amdgcn_perm(v3, v2, q_odd & 0x07070707u);
     return make_int2((int) __builtin_amdgcn_perm(eh, el, 0x03020100u | ((q_even & 0x08080808u) >> 1)),
                      (int) __builtin_amdgcn_perm(oh, ol, 0x03020100u | ((q_odd & 0x08080808u) >> 1)));
 #else

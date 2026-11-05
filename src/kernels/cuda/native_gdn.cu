@@ -25,6 +25,9 @@
 // SOFTWARE.
 #include "strata/kernels/native_gdn.hpp"
 #include "strata/core/geometry.hpp"
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+#include "strata/kernels/gfx906_dlops.hpp"
+#endif
 #include <cuda_runtime.h>
 #include <atomic>
 #include <cmath>
@@ -39,10 +42,14 @@ constexpr int S = 128;
 static_assert(S == strata::core::kCompiledGeometry.ssm_state_size, "native_gdn is compiled for core/geometry.hpp");
 
 __device__ __forceinline__ float warp_sum(float value) {
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+    return strata::kernels::gfx906::wave32_sum_gfx906(value);
+#else
 #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
         value += __shfl_xor_sync(0xffffffff, value, offset, 32);
     return value;
+#endif
 }
 
 __global__ void __launch_bounds__(128, 2)

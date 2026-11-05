@@ -1,3 +1,148 @@
+# Strata (Custom Hardware-Optimized Fork)
+
+A personal fork of [Strata](https://github.com/Niko1221/Strata/) optimized for budget, power-constrained heterogeneous hardware (asymmetrical dual-socket NUMA and AMD ROCm Instinct architecture). Tuned and optimized with assistance from Gemini Argon.
+
+---
+
+## 🖥 Target Hardware Profile
+
+This build is specifically tuned for a power-capped, asymmetrical multi-socket homelab/workstation configuration:
+
+| Component | Specification | Power Limit / Tuning Notes |
+| :--- | :--- | :--- |
+| **CPUs** | Dual Intel Xeon E5-2673 v4 (Broadwell-EP) | Capped at **65W TDP** per socket |
+| **GPU** | 1× AMD Radeon Instinct MI50 (16GB HBM2, PCIe 3.0 via CPU0) | Capped at **130W** via ROCm / powerPlay |
+| **CPU0 Memory** | 3× 16GB DDR4-2133 ECC REG (48 GB) | Primary host memory pool & GPU DMA host |
+| **CPU1 Memory** | 1× 16GB DDR4-2133 ECC REG (16 GB) | Secondary NUMA node / offload tasks |
+| **Total Memory** | 64 GB DDR4-2133 (Asymmetric 48GB / 16GB NUMA split) | Local node allocation priority on Node 0 |
+
+---
+
+## ⚡ Key Optimizations
+
+- **NUMA & Socket Affinity:** Thread affinity and host memory allocations are pinned to **Node 0** to eliminate inter-socket UPI/QPI traffic and PCIe bottlenecks with the MI50.
+- **Power-Cap Resilience:** Thread pooling, execution scheduling, and batch sizes are calibrated to prevent frequency drops under the strict 65W CPU and 130W GPU limits.
+- **ROCm / HBM2 KV Offloading:** Layer distribution and KV cache reuse are balanced to fit within the MI50's 16GB HBM2 while falling back gracefully to Node 0 DDR4 memory when needed.
+
+---
+
+## 📊 Benchmark Results
+
+- **Model Tested:** `Q3.8 FN`
+- **Quantization:** `IQ3_S`
+- **Metric Baseline:** Reported as median values alongside min–max ranges over multiple test runs.
+
+### 1. Interactive Chat & Latency
+
+| Metric | Median | Range (Min – Max) | Samples ($n$) |
+| :--- | :--- | :--- | :--- |
+| **Chat Decode Speed** | **27.80 tok/s** | 24.60 – 30.60 tok/s | $n = 9$ |
+| **Chat Time to First Token (TTFT)** | **1.60 s** | 1.48 – 1.72 s | $n = 9$ |
+
+### 2. Long-Context Prompt Processing
+
+| Context Length | Prompt Processing Speed | Time to First Token (TTFT) | Samples ($n$) |
+| :--- | :--- | :--- | :--- |
+| **4K Context** | **477.00 tok/s** *(409.10 – 478.60)* | **8.49 s** *(8.46 – 9.90)* | $n = 3$ |
+| **16K Context** | **527.70 tok/s** *(505.50 – 527.90)* | **30.51 s** *(30.50 – 31.85)* | $n = 3$ |
+
+### 3. Agentic & Tool-Calling Workloads
+
+| Metric | Median | Range (Min – Max) | Samples ($n$) |
+| :--- | :--- | :--- | :--- |
+| **Agent Cache Hit Rate** | **69.30%** | 69.09% – 69.48% | $n = 3$ |
+| **Agent Re-read Tokens / Session** | **73.00 tokens** | 4.00 – 143.00 tokens | $n = 3$ |
+| **Agent Turn TTFT** | **7.17 s** | 4.61 – 10.44 s | $n = 15$ |
+| **Agent Decode Speed** | **31.00 tok/s** | 27.50 – 34.40 tok/s | $n = 15$ |
+
+### 4. End-to-End Throughput
+
+| Concurrency | Total Throughput | Range (Min – Max) | Samples ($n$) |
+| :--- | :--- | :--- | :--- |
+| **1 Client Total** | **18.76 tok/s** | 15.29 – 18.96 tok/s | $n = 3$ |
+
+---
+
+## 🛠 Recommended Launch & Environment Configuration
+
+To replicate the affinity and power settings used in these runs:
+
+```bash
+# 1. Set GPU Power Cap to 130W (Instinct MI50)
+sudo rocm-smi --setpoweroverdrive 130
+
+# 2. Bind execution strictly to NUMA Node 0 (Host of the MI50 GPU)
+numactl --cpunodebind=0 --membind=0 ./strata-server ...
+
+# 3. config.json
+{
+  "exe": "/path/to/strata",
+  "cwd": "./",
+  "log": "strata.log",
+  "host": "0.0.0.0",
+  "fit_max_tokens": true,
+  "tokenizer": "/pack/iq3s-ablit/tokenizer",
+  "args": [
+    "--pack", "/pack/iq3s-ablit",
+    "--native", "/path/to/00001-of-00002.gguf",
+    "--ple-gguf", "/path/to/00002-of-00002.gguf",
+    "--conversation-cache-mib", "1024",
+    "--max-context", "131072",
+    "--expert-profile", "data/expert-profile.bin",
+    "--kv", "k8v4",
+    "--kv-resident", "16384",
+    "--spec", "3",
+    "--mtp", "/mtp/rt",
+    "--spec-min-p", "0.5",
+    "--pcie-frac", "0.2",
+    "--vram-reserve-mib", "544",
+    "--prefill", "auto",
+    "--expert-cache", "auto",
+    "--expert-cache-per-layer",
+    "--adapt-every", "1",
+    "--adapt-swaps", "80",
+    "--adapt-decay", "0.97",
+    "--adapt-async", "1"
+  ],
+  "backend": "hip",
+  "env": {
+    "STRATA_ROUTE_TAIL_SKIP": "0",
+    "STRATA_IQ_MT_MIN": "1",
+    "STRATA_CPU_MT1": "1",
+    "STRATA_IQ256_GATHER": "1",
+    "STRATA_HIP_ADAPT_KERNEL_COPY": "1",
+    "STRATA_ADAPT_COPY_BLOCKS": "16",
+    "STRATA_DENSE_MMQ": "1",
+    "STRATA_HIP_PROMPT_F16": "1",
+    "STRATA_LFUSE": "1",
+    "STRATA_DECODE_TIMING": "1",
+    "STRATA_EXP_MODE": "8",
+    "STRATA_MMVF_ROWS": "1",
+    "STRATA_GR_NORM_FAST": "1",
+    "STRATA_VERIFY_QDEDUP": "1",
+    "STRATA_POST_COPY_WIDE": "1",
+    "STRATA_GR_UP_EXACT_T": "1",
+    "STRATA_SELECT_SIMT": "1",
+    "STRATA_SESSION_DELTA": "1",
+    "STRATA_PREFILL_CPU_SHARE": "auto",
+    "STRATA_PREFILL_CPU_TOKENS": "16",
+    "STRATA_PREFILL_CPU_SHARE_MAX": "8192"
+  },
+  "api_monitor": true,
+  "gpu_temp_sensor": "junction",
+  "qwen_code_tail": true
+}
+
+```
+
+---
+
+## 📌 Acknowledgments
+
+- Upstream project: **Strata**
+- Optimization and profiling guidance: **Gemini Argon**
+
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
@@ -57,12 +202,11 @@ We recommend **ISTA-DASLab first**, then **Unsloth** and other providers, where 
 In the **desktop app** and the **Terminal**. What does not fit in memory is read from your SSD, so it needs a lot of free
 disk space.
 
-| Set (ISTA-DAS) | Download | Free disk needed |
+| Set (IST-DAS) | Download | Free disk needed |
 | --- | ---: | ---: |
 | 1.75 bpw | 239 GB | about 245 GB |
 | 2.00 bpw | 257 GB | about 265 GB |
 | 2.25 bpw | 274 GB | about 280 GB |
-| ISTA-DAS Coder (half of the experts removed) | 191 GB | about 197 GB |
 
 Runs on NVIDIA RTX 30, 40 and 50 series (Windows and Linux), AMD Radeon AI PRO R9700 (Linux), AMD Ryzen AI Max — Strix Halo
 (Windows), and Apple Silicon Macs with 64 GB or more, text only ([Mac](docs/DEEPSEEK_MAC.md)). Setup downloads the files and the DeepSeek engine, then starts the model.
