@@ -116,6 +116,16 @@ function(strata_ggml_tq_overlay LLAMA OUT)
   # ---- mmq-load-tiles.cuh: the loader, at the end -------------------------------------------------------------------
   _tq_read(_l "${_cu}/mmq-load-tiles.cuh")
   file(WRITE "${OUT}/mmq-load-tiles.cuh" "${_l}\n#include \"tq-mmq-tiles.cuh\"\n")
+  # ---- gfx906: SGPR v_perm_b32 IQ4_NL LUT & 1-add mmq_nib_sign_nonzero_grid in vecdotq.cuh / mmq-load-tiles.cuh ----
+  if(EXISTS "${OUT}/vecdotq.cuh")
+    file(READ "${OUT}/vecdotq.cuh" _vd)
+    string(REPLACE "#if defined(GGML_USE_HIP)" "#if defined(GGML_USE_HIP) || defined(STRATA_HIP_GFX906) || defined(__gfx906__)" _vd "${_vd}")
+    set(_vd_old "static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, const int8_t * table) {")
+    set(_vd_new "#if defined(STRATA_HIP_GFX906) || defined(__gfx906__) || defined(GGML_USE_HIP)\nstatic __device__ __forceinline__ int mmq_nib_sign_nonzero_grid(const uint32_t grid_word, const uint32_t n) {\n    const uint32_t b = __umul24(n & 0xFu, 0x204081u) & 0x01010101u;\n    const uint32_t m = (b << 8) - b;\n    return (int) ((grid_word ^ m) + b);\n}\n#endif\nstatic __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, const int8_t * table) {\n#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)\n    if (table == kvalues_iq4nl) {\n        constexpr uint32_t v0 = 0xBFAD9881u, v1 = 0xF6EADDCFu, v2 = 0x26190D01u, v3 = 0x71594535u;\n        const uint32_t q_even = (uint32_t) q4, q_odd = (uint32_t) q4 >> 4;\n        const uint32_t el = __builtin_amdgcn_perm(v1, v0, q_even & 0x07070707u);\n        const uint32_t ol = __builtin_amdgcn_perm(v1, v0, q_odd  & 0x07070707u);\n        const uint32_t eh = __builtin_amdgcn_perm(v3, v2, q_even & 0x07070707u);\n        const uint32_t oh = __builtin_amdgcn_perm(v3, v2, q_odd  & 0x07070707u);\n        return make_int2((int) __builtin_amdgcn_perm(eh, el, 0x03020100u | ((q_even & 0x08080808u) >> 1)),\n                         (int) __builtin_amdgcn_perm(oh, ol, 0x03020100u | ((q_odd  & 0x08080808u) >> 1)));\n    }\n#endif")
+    string(REPLACE "${_vd_old}" "${_vd_new}" _vd "${_vd}")
+    file(WRITE "${OUT}/vecdotq.cuh" "${_vd}")
+  endif()
+
   configure_file("${_tq}/tq.cuh" "${OUT}/tq.cuh" COPYONLY)
   file(READ "${_tq}/tq-mmq-tiles.cuh" _tiles)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_tq}/tq-mmq-tiles.cuh")

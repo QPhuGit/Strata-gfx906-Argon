@@ -1137,15 +1137,10 @@ template<> struct Split<21> {   // IQ3_S
                 r.g[l0 + 0] = (int) (((uint32_t) grid_pos.x ^ ml) + (ml & 0x01010101u));
                 r.g[l0 + 1] = (int) (((uint32_t) grid_pos.y ^ mh) + (mh & 0x01010101u));
             } else {
-#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
-                r.g[l0 + 0] = nib_sign_nonzero_grid((uint32_t) grid_pos.x, signs_packed_8[l0 / 2]);
-                r.g[l0 + 1] = nib_sign_nonzero_grid((uint32_t) grid_pos.y, signs_packed_8[l0 / 2] >> 4);
-#else
                 const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
                 const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
                 r.g[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
                 r.g[l0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
-#endif
             }
         }
         r.ls = 1 + 2 * ((bq3->scales[iqs / 4] >> ((iqs << 1) & 0x04)) & 0x0F);
@@ -5933,7 +5928,8 @@ template<int SG> struct DotG<21, SG> {
         int sumi = 0;
 #pragma unroll
         for (int j = 0; j < 8; ++j) sumi = ggml_cuda_dp4a(r.g[j], get_int_b4(bq8_1[iqs / 2].qs, j), sumi);
-        const float d = r.dw * (float) r.ls * __low2float(bq8_1[iqs / 2].ds);
+        sumi *= r.ls;
+        const float d = r.dw * __low2float(bq8_1[iqs / 2].ds);
         return d * sumi;
     }
     __device__ static __forceinline__ void apply2(const W& r0, const W& r1, const block_q8_1* bq8_1, int iqs,
@@ -5946,9 +5942,11 @@ template<int SG> struct DotG<21, SG> {
             sumi0 = ggml_cuda_dp4a(r0.g[j], u, sumi0);
             sumi1 = ggml_cuda_dp4a(r1.g[j], u, sumi1);
         }
+        sumi0 *= r0.ls;
+        sumi1 *= r1.ls;
         const float d8 = __low2float(bq.ds);
-        acc0 += (r0.dw * (float) r0.ls * d8) * sumi0;
-        acc1 += (r1.dw * (float) r1.ls * d8) * sumi1;
+        acc0 += (r0.dw * d8) * sumi0;
+        acc1 += (r1.dw * d8) * sumi1;
     }
     __device__ static __forceinline__ float f(const void* vbq, const block_q8_1* bq8_1, int kbx, int iqs,
                                               const uint32_t* grid) {
@@ -6551,7 +6549,7 @@ static void native_expert_grouped_lds(const NativeExpertLayout& L, const unsigne
     const dim3 ggu((unsigned) ((2 * L.n_ff + gu_rows - 1) / gu_rows), (unsigned) gy);
 #if STRATA_EXP_LAYOUTS
 #if defined(STRATA_HIP_GFX906)
-    const int em0 = (grid_groups > 0 && grid_groups < cap_groups) ? 0 : exp_mode();
+    const int em0 = exp_mode();
 #else
     // CUDA: the AMD layouts launch a block row per possible group, so a call that strides (a verify window's PCIe
     // call, grid_groups 1..cap) keeps the CUDA layout: V100, 0 groups 11.3 vs 6.5 us, 1 group of 2 29.6 vs 21.3
