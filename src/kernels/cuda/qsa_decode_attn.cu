@@ -930,7 +930,9 @@ bool pre75_attn() {
 #endif  // ready-made CUDA engine
 }
 // `PRE` picks PR #540's kernel; the environment's choice is STRATA_ATTN_CHUNK.
-#if defined(__HIPCC__)
+#if defined(__HIPCC__) && (defined(__gfx906__) || defined(STRATA_HIP_GFX906))
+#define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? attn_chunk_kernel_pre75<M, 4, true> : attn_chunk_kernel<M, false, true, true>)
+#elif defined(__HIPCC__)
 #define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? attn_chunk_kernel_pre75<M, 8, true> : attn_chunk_kernel<M>)
 #else
 #define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? attn_chunk_kernel_pre75<M> : attn_chunk_kernel<M>)

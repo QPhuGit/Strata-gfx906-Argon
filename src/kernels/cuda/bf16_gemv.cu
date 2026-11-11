@@ -2,6 +2,9 @@
 #include "strata/kernels/bf16_gemv.hpp"
 
 #include "strata/kernels/bf16_bits.hpp"
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+#include "strata/kernels/gfx906_dlops.hpp"
+#endif
 
 #include <cuda_runtime.h>
 
@@ -39,7 +42,11 @@ __global__ void bf16_gemv_warp_kernel(const uint16_t* __restrict__ x, const uint
     float acc = 0.0f;
     for (long long i = lane; i < n_in; i += 32)
         acc += f32_from_bf16(x[i]) * f32_from_bf16(row[i]);
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+    acc = strata::kernels::gfx906::wave32_sum_gfx906(acc);
+#else
     for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xFFFFFFFFu, acc, off);
+#endif
     if (lane == 0) y[o] = acc;
 }
 

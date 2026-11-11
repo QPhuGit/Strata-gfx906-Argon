@@ -257,9 +257,18 @@ __device__ __forceinline__ uint32_t unpack_ksigns(uint32_t v) {
 }
 // 8 bytes of a codebook entry with the sign byte `s` (broadcast) applied: bits 0-3 to .x, 4-7 to .y
 __device__ __forceinline__ void signed8(uint32_t gx, uint32_t gy, uint32_t s, uint32_t& qx, uint32_t& qy) {
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+    const uint32_t b0 = __umul24(s & 0xFu, 0x204081u) & 0x01010101u;
+    const uint32_t m0 = (b0 << 8) - b0;
+    qx = (gx ^ m0) + b0;
+    const uint32_t b1 = __umul24((s >> 4) & 0xFu, 0x204081u) & 0x01010101u;
+    const uint32_t m1 = (b1 << 8) - b1;
+    qy = (gy ^ m1) + b1;
+#else
     const uint32_t m0 = __vcmpne4(s & 0x08040201u, 0), m1 = __vcmpne4(s & 0x80402010u, 0);
     qx = __vsub4(gx ^ m0, m0);
     qy = __vsub4(gy ^ m1, m1);
+#endif
 }
 #if defined(__HIPCC__)
 // gfx11 (Aurora): the signs from a shared-memory table instead of the compare / subtract emulation.  An entry (one per

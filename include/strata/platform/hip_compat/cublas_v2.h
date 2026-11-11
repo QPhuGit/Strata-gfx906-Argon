@@ -3,6 +3,14 @@
 #include "strata_hip.h"
 #ifndef HIPBLAS_V2
 #define HIPBLAS_V2
+#ifndef cublasSgemm
+#define cublasSgemm hipblasSgemm
+#endif
+#ifndef cublasGemmStridedBatchedEx
+#define cublasGemmStridedBatchedEx hipblasGemmStridedBatchedEx
+#endif
+#undef CUBLAS_COMPUTE_32F
+#define CUBLAS_COMPUTE_32F HIPBLAS_R_32F
 #endif
 #include <hipblas/hipblas.h>
 

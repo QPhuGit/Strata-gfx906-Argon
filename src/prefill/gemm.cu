@@ -1,6 +1,9 @@
 // src/prefill/gemm.cu - see include/strata/prefill/gemm.hpp.
 #include "strata/prefill/gemm.hpp"
 #include "strata/kernels/dequant_bf16.hpp"
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+#include "strata/kernels/gfx906_dlops.hpp"
+#endif
 #if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
 #include "strata/prefill/moe_mmq.hpp"
 #endif
@@ -106,6 +109,94 @@ __global__ void widen_rows_f16(float* __restrict__ Y, int64_t n, int64_t ldy, in
         __syncthreads();
     }
 }
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+// Bảng lưu hệ số dịch mũ lũy thừa 2 cho tối đa 65536 hàng trọng số trong 1 lát cắt prefill
+__device__ int16_t g_w_row_shift[65536];
+__device__ int g_any_row_shifted = 0;
+
+// Dịch mũ lũy thừa 2 theo từng hàng cho trọng số BF16 -> FP16 (KHÔNG kẹp ngưỡng cứng +-65504):
+// - Nếu toàn bộ phần tử trong hàng đã nằm trong miền chuẩn an toàn của FP16 ([-14, +13]), shift = 0.
+// - Nếu có phần tử cực đại (> 2^13 lên tới 3.39e38) hoặc cực tiểu (< 2^-14 xuống tới 1.18e-38),
+//   dịch toàn bộ hàng theo lũy thừa 2 (shift = 13 - e_max) để bảo toàn tuyệt đối 7-bit mantissa của BF16.
+__global__ __launch_bounds__(256, 4)
+void bf16_to_f16_rows_scaled_gfx906(const uint16_t* __restrict__ s, __half* __restrict__ d, int64_t rows, int64_t cols) {
+    const int64_t r = blockIdx.x;
+    if (r >= rows) return;
+    const uint16_t* row_s = s + r * cols;
+    __half* row_d = d + r * cols;
+
+    __shared__ int s_emax[4];
+    __shared__ int s_emin[4];
+    const int wave_id = threadIdx.x >> 6;
+    const int lane_id = threadIdx.x & 63;
+
+    int local_max = -1000, local_min = 1000;
+    for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) {
+        const float f = __uint_as_float((uint32_t) row_s[c] << 16);
+        bool is_z = false;
+        const int e = strata::kernels::gfx906::extract_unbiased_exp_f32(f, is_z);
+        if (!is_z && e < 128) {
+            if (e > local_max) local_max = e;
+            if (e < local_min) local_min = e;
+        }
+    }
+    #pragma unroll
+    for (int offset = 32; offset > 0; offset >>= 1) {
+        const int o_max = __shfl_xor(local_max, offset, 64);
+        const int o_min = __shfl_xor(local_min, offset, 64);
+        if (o_max > local_max) local_max = o_max;
+        if (o_min < local_min) local_min = o_min;
+    }
+    if (lane_id == 0) {
+        s_emax[wave_id] = local_max;
+        s_emin[wave_id] = local_min;
+    }
+    __syncthreads();
+
+    int e_max = s_emax[0], e_min = s_emin[0];
+    #pragma unroll
+    for (int w = 1; w < 4; ++w) {
+        if (s_emax[w] > e_max) e_max = s_emax[w];
+        if (s_emin[w] < e_min) e_min = s_emin[w];
+    }
+
+    int shift = 0;
+    if (e_max != -1000) {
+        if (e_max > 14)       shift = -e_max;      // Cực đại (> 32768 .. 3.4e38): đưa đỉnh về [1.0, 2.0)
+        else if (e_max < -14) shift = -2 - e_max;  // Cực tiểu (< 6.1e-5 .. 1.2e-38): nâng đỉnh lên [0.25, 0.5)
+    }
+    if (threadIdx.x == 0 && r < 65536) {
+        if (r == 0) g_any_row_shifted = 0;
+        g_w_row_shift[r] = (int16_t) shift;
+        if (shift != 0) atomicExch(&g_any_row_shifted, 1);
+    }
+
+    for (int64_t c = threadIdx.x; c < cols; c += blockDim.x) {
+        const float f = __uint_as_float((uint32_t) row_s[c] << 16);
+        const float scaled = (shift == 0) ? f : strata::kernels::gfx906::scale_pow2_f32(f, shift);
+        row_d[c] = __float2half_rn(scaled);
+    }
+}
+
+__global__ void widen_rows_f16_unscale_gfx906(float* __restrict__ Y, int64_t n, int64_t ldy, int count_nonfinite) {
+    float* y = Y + (int64_t) blockIdx.x * ldy;
+    const __half* h = reinterpret_cast<const __half*>(y);
+    const int64_t nb = (n + blockDim.x - 1) / blockDim.x;
+    for (int64_t b = nb - 1; b >= 0; --b) {
+        const int64_t c = b * blockDim.x + threadIdx.x;
+        float v = 0.0f;
+        if (c < n) {
+            const float raw = __half2float(h[c]);
+            const int shift = (__builtin_expect(g_any_row_shifted != 0, 0) && c < 65536) ? (int) g_w_row_shift[c] : 0;
+            v = (shift == 0) ? raw : strata::kernels::gfx906::scale_pow2_f32(raw, -shift);
+        }
+        if (count_nonfinite && c < n && !isfinite(v)) atomicAdd(&g_f16_nonfinite, 1ull);
+        __syncthreads();
+        if (c < n) y[c] = v;
+        __syncthreads();
+    }
+}
+#endif
 // BF16 weight rows -> FP16, saturated (bench/results/2026-10-04-rdna2-fp16-prompt: none leaves FP16's range)
 __global__ void bf16_to_f16_rows(const uint16_t* __restrict__ s, __half* __restrict__ d, int64_t n) {
     for (int64_t i = blockIdx.x * (int64_t) blockDim.x + threadIdx.x; i < n; i += (int64_t) gridDim.x * blockDim.x) {
@@ -1078,8 +1169,19 @@ void Gemm::bf16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64
         if (rows <= 0) { std::fprintf(stderr, "prefill gemm: scratch too small for K=%lld\n", (long long) K); std::exit(1); }
         for (int64_t r0 = 0; r0 < N; r0 += rows) {
             const int64_t n = std::min(rows, N - r0);
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+            bf16_to_f16_rows_scaled_gfx906<<<(unsigned) n, 256, 0, (cudaStream_t) stream_>>>(W + r0 * K, (__half*) scratch_, n, K);
+            const float one = 1.0f, zero = 0.0f;
+            ck(cublasGemmEx((cublasHandle_t) handle_, CUBLAS_OP_T, CUBLAS_OP_N, (int) n, (int) T, (int) K, &one, scratch_,
+                            CUDA_R_16F, (int) K, X, CUDA_R_16F, (int) K, &zero, Y + r0, CUDA_R_16F, (int) (2 * ldy),
+                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+               "cublasGemmEx f16 out scaled");
+            static const bool dbg_nan = std::getenv("STRATA_DBG_NAN") != nullptr;
+            widen_rows_f16_unscale_gfx906<<<(unsigned) T, 256, 0, (cudaStream_t) stream_>>>(Y + r0, n, ldy, dbg_nan ? 1 : 0);
+#else
             bf16_to_f16_rows<<<1024, 256, 0, (cudaStream_t) stream_>>>(W + r0 * K, (__half*) scratch_, n * K);
             f16_inplace(X, scratch_, Y + r0, T, n, K, ldy);
+#endif
         }
         return;
     }

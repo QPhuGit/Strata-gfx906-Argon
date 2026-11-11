@@ -4,6 +4,9 @@
 // elementwise.cu) with the same operation order, so a verify window reproduces plain decode bit for bit.
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/core/bw_dense_defaults.hpp"
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+#include "strata/kernels/gfx906_dlops.hpp"
+#endif
 #include "strata/core/geometry.hpp"
 #include "strata/core/emulate.hpp"
 #include "strata/core/sm120_series.hpp"
@@ -395,7 +398,11 @@ __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __re
         }
         // every thread takes the shuffles, as the single-token kernel does: inside the `rg == 0` branch hipcc on
         // gfx1151 gave another rounding for 3% of the outputs (gdn_parity section 5 on Aurora)
+        #if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+        sq_part = strata::kernels::gfx906::wave32_sum_gfx906(sq_part);
+#else
         for (int o2 = 16; o2 > 0; o2 >>= 1) sq_part += __shfl_xor_sync(0xffffffffu, sq_part, o2);
+#endif
         if (rg == 0 && (col & 31) == 0) wsum[col >> 5] = sq_part;
         __syncthreads();
         if (rg == 0) {
@@ -568,7 +575,11 @@ __global__ void __launch_bounds__(S * RG) gdn_out_norm_kernel(const float* __res
         oc = y[(size_t) t * value_dim + head * S + col];
         sq_part = oc * oc;
     }
-    for (int o2 = 16; o2 > 0; o2 >>= 1) sq_part += __shfl_xor_sync(0xffffffffu, sq_part, o2);
+    #if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+        sq_part = strata::kernels::gfx906::wave32_sum_gfx906(sq_part);
+#else
+        for (int o2 = 16; o2 > 0; o2 >>= 1) sq_part += __shfl_xor_sync(0xffffffffu, sq_part, o2);
+#endif
     if ((tid & 31) == 0) wsum[tid >> 5] = sq_part;
     __syncthreads();
     if (rg == 0) {

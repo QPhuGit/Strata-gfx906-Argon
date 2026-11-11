@@ -8,6 +8,7 @@ bench/micro/*.obj
 bench/micro/*.bin
 bench/micro/*.dll
 bench/micro/*.txt
+bench/results/*
 *.log
 build*/
 pack/
@@ -26,7 +27,7 @@ __pycache__/
 td.log
 
 # created by setup.py on the user's machine
-/.venv/
+/.venv*/
 /build/
 /third_party/llama.cpp
 /models/
@@ -95,3 +96,10 @@ node_modules/
 /build-spark/
 /build-vision-spark/
 /.venv-build/
+
+#custom
+ab_engine.jsonl
+config*.json
+history.txt
+calibrate.json
+strata*.patch

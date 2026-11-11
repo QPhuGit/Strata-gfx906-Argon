@@ -412,6 +412,8 @@ class Suite:
         self.run_chat()
         self.run_prompt(4096, "4K")
         self.run_prompt(16384, "16K")
+        """self.run_prompt(32768, "32k")
+        self.run_prompt(65536, "64k")"""
         self.run_agent()
         if self.clients:
             self.run_clients(self.clients)
