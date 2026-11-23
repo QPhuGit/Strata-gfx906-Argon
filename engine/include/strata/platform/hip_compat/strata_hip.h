@@ -233,18 +233,23 @@ static __device__ __forceinline__ void strata_nanosleep(unsigned int ns) {
 
 // __dp4a(a, b, c): signed 8-bit dot product plus accumulator; gfx906 has v_dot4_i32_i8.
 static __device__ __forceinline__ int strata_dp4a(int a, int b, int c) {
-#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) || defined(__GFX11__) || defined(__GFX12__)
-    return __builtin_amdgcn_sdot4(a, b, c, false);
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__)) && __has_builtin(__builtin_amdgcn_sdot4)
+    return __builtin_amdgcn_sdot4(a, b, c, false); // Phát sinh trực tiếp lệnh v_dot4_i32_i8
 #else
-    const int8_t* va = reinterpret_cast<const int8_t*>(&a);
-    const int8_t* vb = reinterpret_cast<const int8_t*>(&b);
-    return c + va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2] + va[3] * vb[3];
+    const int8_t* pa = reinterpret_cast<const int8_t*>(&a);
+    const int8_t* pb = reinterpret_cast<const int8_t*>(&b);
+    return c + int(pa[0]) * int(pb[0]) + int(pa[1]) * int(pb[1])
+             + int(pa[2]) * int(pb[2]) + int(pa[3]) * int(pb[3]);
 #endif
 }
 static __device__ __forceinline__ unsigned int strata_dp4a(unsigned int a, unsigned int b, unsigned int c) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__)) && __has_builtin(__builtin_amdgcn_udot4)
+    return __builtin_amdgcn_udot4(a, b, c, false); // v_dot4_u32_u8
+#else
     const uint8_t* va = reinterpret_cast<const uint8_t*>(&a);
     const uint8_t* vb = reinterpret_cast<const uint8_t*>(&b);
     return c + va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2] + va[3] * vb[3];
+#endif
 }
 #define __dp4a strata_dp4a
 
@@ -309,3 +314,27 @@ static __device__ __forceinline__ unsigned int strata_byte_perm(unsigned int x, 
 #define __byte_perm(x, y, s) strata_byte_perm((unsigned int) (x), (unsigned int) (y), (unsigned int) (s))
 
 #endif  // device side
+
+// gfx906 v0.2.20 hip_compat additions
+#ifndef cudaDevP2PAttrPerformanceRank
+#define cudaDevP2PAttrPerformanceRank hipDevP2PAttrPerformanceRank
+#endif
+#ifndef cudaDevP2PAttrAccessSupported
+#define cudaDevP2PAttrAccessSupported hipDevP2PAttrAccessSupported
+#endif
+#ifndef cudaDevP2PAttrNativeAtomicSupported
+#define cudaDevP2PAttrNativeAtomicSupported hipDevP2PAttrNativeAtomicSupported
+#endif
+#ifndef cudaDevP2PAttrCudaArrayAccessSupported
+#define cudaDevP2PAttrCudaArrayAccessSupported hipDevP2PAttrHipArrayAccessSupported
+#endif
+#ifndef cudaDeviceGetPCIBusId
+#define cudaDeviceGetPCIBusId hipDeviceGetPCIBusId
+#endif
+
+#ifndef cudaDeviceP2PAttr
+#define cudaDeviceP2PAttr hipDeviceP2PAttr
+#endif
+#ifndef cudaDeviceGetP2PAttribute
+#define cudaDeviceGetP2PAttribute hipDeviceGetP2PAttribute
+#endif

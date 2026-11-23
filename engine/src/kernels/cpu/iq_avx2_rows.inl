@@ -612,10 +612,17 @@ void dot_type(int type, int nt, const uint8_t* w, size_t row_bytes, int n, const
 template <int NT> STRATA_ROWS_FN
 void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const* y, float* const* out,
                 int r0, int r1) {
-    const __m128i values = _mm_loadu_si128((const __m128i*) kvalues_iq4nl);
-    const __m128i m4b = _mm_set1_epi8(0x0f);
+    const __m128i values128 = _mm_loadu_si128((const __m128i*) kvalues_iq4nl);
+    const __m256i values = _mm256_broadcastsi128_si256(values128);
+    const __m256i m4b = _mm256_set1_epi8(0x0f);
     const int nb = n / QK4_NL;
     const int pf = prefetch_distance();
+    float dy_buf[NT][128];
+    const bool use_dy = (nb <= 128);
+    if (use_dy) {
+        for (int t = 0; t < NT; ++t)
+            for (int ib = 0; ib < nb; ++ib) dy_buf[t][ib] = h2f(y[t][ib].d);
+    }
     for (int r = r0; r < r1; ++r) {
         const uint8_t* row = w + (size_t) r * row_bytes;
         __m256 accf[NT];
@@ -624,17 +631,17 @@ void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* con
             const uint8_t* blk = row + (size_t) ib * sizeof(block_iq4_nl);
             rows_ahead(blk, pf);
             const __m128i bits = _mm_loadu_si128((const __m128i*) (blk + 2));
-            const __m128i lo = _mm_and_si128(bits, m4b);                      // values 0..15
-            const __m128i hi = _mm_and_si128(_mm_srli_epi16(bits, 4), m4b);    // values 16..31
-            const __m256i q4 = _mm256_inserti128_si256(_mm256_castsi128_si256(_mm_shuffle_epi8(values, lo)),
-                                                       _mm_shuffle_epi8(values, hi), 1);
-            const __m256i aq = _mm256_sign_epi8(q4, q4);   // |w|: the unsigned operand of maddubs
+            const __m256i nib = _mm256_and_si256(
+                _mm256_inserti128_si256(_mm256_castsi128_si256(bits), _mm_srli_epi16(bits, 4), 1), m4b);
+            const __m256i q4 = _mm256_shuffle_epi8(values, nib);
+            const __m256i aq = _mm256_abs_epi8(q4);   // |w|: exact same bits as _mm256_sign_epi8(q4, q4)
             const float dx = h2f(u16(blk));
             for (int t = 0; t < NT; ++t) {
                 const block_q8_0& b = y[t][ib];
                 const __m256i q8 = _mm256_loadu_si256((const __m256i*) b.qs);
                 const __m256i p = dot4u(aq, _mm256_sign_epi8(q8, q4));
-                accf[t] = _mm256_fmadd_ps(_mm256_set1_ps(dx * h2f(b.d)), _mm256_cvtepi32_ps(p), accf[t]);
+                const float dy = use_dy ? dy_buf[t][ib] : h2f(b.d);
+                accf[t] = _mm256_fmadd_ps(_mm256_set1_ps(dx * dy), _mm256_cvtepi32_ps(p), accf[t]);
             }
         }
         for (int t = 0; t < NT; ++t) out[t][r] = hsum8(accf[t]);

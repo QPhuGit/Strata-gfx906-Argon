@@ -109,9 +109,13 @@ i8h_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __rest
     }
     uint32_t kv[4] = {0, 0, 0, 0};
     if constexpr (T == 20 || T == 23) {
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+        kv[0] = 0xBFAD9881u; kv[1] = 0xF6EADDCFu; kv[2] = 0x26190D01u; kv[3] = 0x71594535u;
+#else
         const uint32_t* t = (const uint32_t*) kvalues_iq4nl;
 #pragma unroll
         for (int i = 0; i < 4; ++i) kv[i] = t[i];
+#endif
     }
     if (tid < I8H_BM) s_src[tid] = (e_lo + tid < e_hi) ? (GU ? ent_idx[e_lo + tid] : e_lo + tid) : -1;
     __syncthreads();

@@ -3,6 +3,9 @@
 #include "strata/kernels/window_limits.hpp"
 #include "s26_tsum.cuh"
 #include "strata/kernels/bf16_bits.hpp"
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+#include "strata/kernels/gfx906_dlops.hpp"
+#endif
 #include "strata/kernels/pdl.hpp"
 
 #include <cuda_runtime.h>
@@ -40,10 +43,14 @@ namespace {
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 __device__ __forceinline__ float mmvf_warp_sum(float value) {
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+    return strata::kernels::gfx906::wave32_sum_gfx906(value);
+#else
 #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
         value += __shfl_xor_sync(0xffffffffu, value, offset, 32);
     return value;
+#endif
 }
 
 // STRATA_MMVF_CHECK=1 (diagnostic): the constant-trip fast path also runs the plain loop with volatile loads (so the loads happen again, later) and
@@ -315,20 +322,23 @@ void launch_rows(const float* x, int64_t ldx, const uint16_t* w, float* y, int64
     constexpr int RPB = 4;
     const unsigned nb = (unsigned) ((n_out + RPB - 1) / RPB);
     static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
-    if (w_aux != nullptr) {   // S26 STRATA_LFUSE: + one aux row block
+    if (w_aux != nullptr) {   // S26 STRATA_LFUSE: + one aux row block (hỗ trợ cả n_tok == 1)
 #define S26_AUX(TSV) \
-        if (n_tok <= 4) bf16_f32_mmvf_rows_kernel<B, 4, RPB, TSV, true><<<nb + 1, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok, w_aux, y_aux, ldy_aux); \
+        if (n_tok == 1) bf16_f32_mmvf_rows_kernel<B, 1, RPB, TSV, true><<<nb + 1, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok, w_aux, y_aux, ldy_aux); \
+        else if (n_tok <= 4) bf16_f32_mmvf_rows_kernel<B, 4, RPB, TSV, true><<<nb + 1, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok, w_aux, y_aux, ldy_aux); \
         else bf16_f32_mmvf_rows_kernel<B, 8, RPB, TSV, true><<<nb + 1, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok, w_aux, y_aux, ldy_aux);
         if (ts) { S26_AUX(true) } else { S26_AUX(false) }
 #undef S26_AUX
         return;
     }
     if (ts) {
-        if (n_tok <= 4) bf16_f32_mmvf_rows_kernel<B, 4, RPB, true><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
+        if (n_tok == 1) bf16_f32_mmvf_rows_kernel<B, 1, RPB, true><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
+        else if (n_tok <= 4) bf16_f32_mmvf_rows_kernel<B, 4, RPB, true><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
         else bf16_f32_mmvf_rows_kernel<B, 8, RPB, true><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
         return;
     }
-    if (n_tok <= 4) bf16_f32_mmvf_rows_kernel<B, 4, RPB><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
+    if (n_tok == 1) bf16_f32_mmvf_rows_kernel<B, 1, RPB><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
+    else if (n_tok <= 4) bf16_f32_mmvf_rows_kernel<B, 4, RPB><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
     else bf16_f32_mmvf_rows_kernel<B, 8, RPB><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
 }
 
@@ -387,7 +397,14 @@ int mmvf_block_size(int64_t n_in) {
 bool bf16_gemv_fp32_mmvf_multi_aux(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy,
                                    int64_t n_in, int64_t n_out, int n_tok, const uint16_t* w_aux, float* y_aux,
                                    int64_t ldy_aux, void* stream) {
-    static const bool rows = [] { const char* v = std::getenv("STRATA_MMVF_ROWS"); return v && v[0] == '1'; }();
+    static const bool rows = [] {
+        const char* v = std::getenv("STRATA_MMVF_ROWS");
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+        return v == nullptr || v[0] == '\0' || v[0] != '0';
+#else
+        return v && v[0] == '1';
+#endif
+    }();
     // exactly the conditions under which both calls would take the rows / multi kernels at the same block size
     if (!rows || n_out < 64 || n_tok < 2 || n_tok > 8 || n_in <= 0 || (n_in & 1) != 0 || (ldx & 1) != 0 || x == nullptr ||
         w == nullptr || y == nullptr || w_aux == nullptr || y_aux == nullptr || (reinterpret_cast<uintptr_t>(x) & 7u) != 0)
@@ -412,7 +429,6 @@ bool bf16_gemv_fp32_mmvf_multi_aux(const float* x, int64_t ldx, const uint16_t* 
 
 void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy,
                                int64_t n_in, int64_t n_out, int n_tok, void* stream) {
-    if (n_tok == 1 && ldy >= n_out) { bf16_gemv_fp32_mmvf(x, w, y, n_in, n_out, stream); return; }
     if (n_tok < 1 || n_tok > STRATA_VERIFY_MAX_T || n_in <= 0 || (n_in & 1) != 0 || n_out <= 0 || (ldx & 1) != 0 ||
         x == nullptr || w == nullptr || y == nullptr || (reinterpret_cast<uintptr_t>(x) & 7u) != 0)
         throw std::invalid_argument("bf16_gemv_fp32_mmvf_multi: 1..8 rows (16 in a wide build), even n_in/ldx, aligned pointers");
@@ -435,6 +451,7 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
             throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_multi launch: ") + cudaGetErrorString(result));
         return;
     }
+    if (n_tok == 1 && ldy >= n_out) { bf16_gemv_fp32_mmvf(x, w, y, n_in, n_out, stream); return; }
     // 9..16 rows (wide builds only): one exact instantiation per row count, each row's dot independent of the others.  7 and 8
     // rows stay with the default case below, the instantiation they always had.
 #if STRATA_VERIFY_MAX_T > 8

@@ -290,6 +290,15 @@ __device__ __forceinline__ void i8_pack(const uint32_t (&r)[I8NR<T>], int ib, ui
 
 // 8 nibbles through a 16-entry int8 table (4 words): the low nibbles' values in lo, the high ones' in hi
 __device__ __forceinline__ void i8_table16(uint32_t q4, const uint32_t (&t)[4], uint32_t& lo, uint32_t& hi) {
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__) || defined(__HIPCC__)
+    const uint32_t q_even = q4, q_odd = q4 >> 4;
+    const uint32_t el = __builtin_amdgcn_perm(t[1], t[0], q_even & 0x07070707u);
+    const uint32_t ol = __builtin_amdgcn_perm(t[1], t[0], q_odd  & 0x07070707u);
+    const uint32_t eh = __builtin_amdgcn_perm(t[3], t[2], q_even & 0x07070707u);
+    const uint32_t oh = __builtin_amdgcn_perm(t[3], t[2], q_odd  & 0x07070707u);
+    lo = __builtin_amdgcn_perm(eh, el, 0x03020100u | ((q_even & 0x08080808u) >> 1));
+    hi = __builtin_amdgcn_perm(oh, ol, 0x03020100u | ((q_odd  & 0x08080808u) >> 1));
+#else
     uint32_t tmp[2];
     const uint32_t sel = 0x32103210u | ((q4 & 0x88888888u) >> 1);
 #pragma unroll
@@ -300,6 +309,7 @@ __device__ __forceinline__ void i8_table16(uint32_t q4, const uint32_t (&t)[4], 
     }
     lo = __byte_perm(tmp[0], tmp[1], 0x6420);
     hi = __byte_perm(tmp[0], tmp[1], 0x7531);
+#endif
 }
 
 // 8 grid bytes with a sign pattern applied: t = {byte mask of the 4 low values, byte mask of the 4 high values} (the +1 of a negated byte is its mask's low bit); per byte
@@ -601,9 +611,13 @@ i8_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __restr
     }
     uint32_t kv[4] = {0, 0, 0, 0};
     if constexpr (T == 20 || T == 23) {
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+        kv[0] = 0xBFAD9881u; kv[1] = 0xF6EADDCFu; kv[2] = 0x26190D01u; kv[3] = 0x71594535u;
+#else
         const uint32_t* t = (const uint32_t*) kvalues_iq4nl;
 #pragma unroll
         for (int i = 0; i < 4; ++i) kv[i] = t[i];
+#endif
     }
     if (bisect == 2) return;
     if (tid < BM) s_src(tid) = (e_lo + tid < e_hi) ? (GU ? ent_idx[e_lo + tid] : e_lo + tid) : -1;
@@ -945,9 +959,13 @@ i8b_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __rest
     }
     uint32_t kv[4] = {0, 0, 0, 0};
     if constexpr (T == 20 || T == 23) {
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+        kv[0] = 0xBFAD9881u; kv[1] = 0xF6EADDCFu; kv[2] = 0x26190D01u; kv[3] = 0x71594535u;
+#else
         const uint32_t* t = (const uint32_t*) kvalues_iq4nl;
 #pragma unroll
         for (int i = 0; i < 4; ++i) kv[i] = t[i];
+#endif
     }
     if (tid < I8B_BM) s_src[tid] = (e_lo + tid < e_hi) ? (GU ? ent_idx[e_lo + tid] : e_lo + tid) : -1;
     __syncthreads();
