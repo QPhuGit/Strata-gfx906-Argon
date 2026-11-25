@@ -75,9 +75,9 @@ __device__ __forceinline__ float fdot2_f32_f16(const __half2 a, const __half2 b,
 // Gộp tổng 32 làn (logical warp) trên Wave64 bằng lệnh thanh ghi GFX9 DPP 1 chu kỳ
 __device__ __forceinline__ float wave32_sum_gfx906(float val) {
 #if (defined(__gfx906__) || defined(STRATA_HIP_GFX906)) && defined(__HIP_DEVICE_COMPILE__)
-    val += __shfl_xor(val, 16, 32);
+    val += __int_as_float(__builtin_amdgcn_ds_swizzle(__float_as_int(val), 0x401F));
     val += __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(val), 0x128, 0xF, 0xF, false)); // row_ror:8
-    val += __shfl_xor(val, 4, 32);                                                                 // bước 4 bắt buộc dùng shfl_xor
+    val += __int_as_float(__builtin_amdgcn_ds_swizzle(__float_as_int(val), 0x101F));                                                                 // bước 4 bắt buộc dùng shfl_xor
     val += __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(val), 0x4E,  0xF, 0xF, false)); // quad_perm:[2,3,0,1]
     val += __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(val), 0xB1,  0xF, 0xF, false)); // quad_perm:[1,0,3,2]
     return val;

@@ -26,9 +26,11 @@ template <int O>
 __device__ __forceinline__ float xmov(float v) {
     // Trên GFX9 (Vega 20), row_ror:8 (0x128), quad_perm:[2,3,0,1] (0x4E) và quad_perm:[1,0,3,2] (0xB1)
     // là các phép hoán vị XOR chính xác tuyệt đối cho mọi dữ liệu bất kỳ trong 1 chu kỳ thanh ghi.
-    if constexpr (O == 8) return __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0x128, 0xf, 0xf, false));
-    if constexpr (O == 2) return __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0x4E,  0xf, 0xf, false));
-    if constexpr (O == 1) return __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0xB1,  0xf, 0xf, false));
+    if constexpr (O == 16) return __int_as_float(__builtin_amdgcn_ds_swizzle(__float_as_int(v), 0x401F));
+    if constexpr (O == 8)  return __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0x128, 0xf, 0xf, false));
+    if constexpr (O == 4)  return __int_as_float(__builtin_amdgcn_ds_swizzle(__float_as_int(v), 0x101F));
+    if constexpr (O == 2)  return __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0x4E,  0xf, 0xf, false));
+    if constexpr (O == 1)  return __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0xB1,  0xf, 0xf, false));
     return __shfl_xor_sync(0xffffffffu, v, O);
 }
 #else

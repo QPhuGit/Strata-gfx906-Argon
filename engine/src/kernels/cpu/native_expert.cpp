@@ -659,7 +659,7 @@ void native_gu_rows_impl(const NativeFmt& f, const uint8_t* blob, const void* co
     // Unsloth UD-Q4_K_XL's Q4_K gate/up: the multi-token kernel is bit-exact against ggml's per-token dot (any group
     // size, no #152 rule).  Opt-in, STRATA_KQ256=1: measured no faster in the engine (a window's expert groups hold
     // ~1.4 tokens and the weights stay in L1 across ggml's per-token calls; 1.01-1.13x in native_expert_parity).
-    static const bool kq = [] { const char* v = std::getenv("STRATA_KQ256"); return cpu_avx2_ok() && v != nullptr && std::atoi(v) != 0; }();
+    static const bool kq = [] { const char* v = std::getenv("STRATA_KQ256"); return cpu_avx2_ok() && (v != nullptr && v[0] != '\0' ? std::atoi(v) != 0 : !cpu_avx512_ok()); }();
     // BW-4 (0.2.17): on an AVX-512 VNNI CPU the same rows in 512-bit lanes (kq_avx512.cpp): the integer part of a Q4_K block on vpdpbusd / vpdpwssd, the weights decoded once per row
     // for every token of the group.  Bit-exact against the per-token dot (kq512_ok checks that on first use, per build); STRATA_NO_KQ512=1 never takes them, STRATA_KQ512_MIN=N: from N tokens on (default 8 = the prompt share's jobs; the 2-7 token groups of a decode window ran 1-6% slower on the rows at floors 3 and 4 on a Xeon 8352V, level at 8).
     static const bool kq512 = cpu_avx512_ok() && std::getenv("STRATA_NO_KQ512") == nullptr;
@@ -804,7 +804,7 @@ void native_down_rows_impl(const NativeFmt& f, const uint8_t* blob, const void* 
         if ((mt1 == nullptr || mt1[0] != '0') && cpu_avx2_ok() && !cpu_avx512_ok()) return 1;
         return 2;
     }();
-    static const bool kq = [] { const char* v = std::getenv("STRATA_KQ256"); return v != nullptr && std::atoi(v) != 0; }();
+    static const bool kq = [] { const char* v = std::getenv("STRATA_KQ256"); return v != nullptr && v[0] != '\0' ? std::atoi(v) != 0 : (cpu_avx2_ok() && !cpu_avx512_ok()); }();
     // Both multi-token kernels below are /arch:AVX2 translation units (kq_avx2.cpp and iq_avx2.cpp),
     // so a CPU without AVX2 has to reach ggml-cpu's vec_dot instead - same reasoning as the gate/up
     // rows above, where `avx512` tested cpu_avx512_ok() and `avx2` did not.

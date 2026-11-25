@@ -68,6 +68,19 @@ __device__ __forceinline__ int gfx906_sign_nz(const uint32_t grid_word, const ui
     const uint32_t m = (b << 8) - b;
     return (int) ((grid_word ^ m) + b);
 }
+__device__ __forceinline__ float gfx906_xor16(float v) { return __int_as_float(__builtin_amdgcn_ds_swizzle(__float_as_int(v), 0x401F)); }
+__device__ __forceinline__ float gfx906_xor8(float v)  { return __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0x128, 0xf, 0xf, false)); }
+__device__ __forceinline__ float gfx906_xor4(float v)  { return __int_as_float(__builtin_amdgcn_ds_swizzle(__float_as_int(v), 0x101F)); }
+__device__ __forceinline__ float gfx906_xor2(float v)  { return __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0x4E,  0xf, 0xf, false)); }
+__device__ __forceinline__ float gfx906_xor1(float v)  { return __int_as_float(__builtin_amdgcn_mov_dpp(__float_as_int(v), 0xB1,  0xf, 0xf, false)); }
+__device__ __forceinline__ int gfx906_rfl_i32(int v) { return __builtin_amdgcn_readfirstlane(v); }
+__device__ __forceinline__ float gfx906_rfl_f32(float v) { return __int_as_float(__builtin_amdgcn_readfirstlane(__float_as_int(v))); }
+__device__ __forceinline__ const uint8_t* gfx906_rfl_ptr(const uint8_t* p) {
+    const uint64_t u = reinterpret_cast<uint64_t>(p);
+    const uint32_t lo = (uint32_t) __builtin_amdgcn_readfirstlane((int) (u & 0xffffffffu));
+    const uint32_t hi = (uint32_t) __builtin_amdgcn_readfirstlane((int) (u >> 32));
+    return reinterpret_cast<const uint8_t*>(((uint64_t) hi << 32) | (uint64_t) lo);
+}
 #endif
 __device__ __forceinline__ int2 get_int_from_table_16_iq4nl(const int& q4) {
 #if defined(__HIPCC__) || defined(STRATA_HIP_GFX906)
@@ -962,9 +975,18 @@ template<> struct Fmt<40> { static constexpr int qk = 64, ipb = 2, step = 4;    
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_nvfp4_q8_1(v, y, kbx, iqs); } };
 
 __device__ __forceinline__ float warp_sum(float v) {
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+    v += gfx906_xor16(v);
+    v += gfx906_xor8(v);
+    v += gfx906_xor4(v);
+    v += gfx906_xor2(v);
+    v += gfx906_xor1(v);
+    return v;
+#else
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
     return v;
+#endif
 }
 
 // One row against one q8_1 activation, the whole warp: call k = (block, part) is lane-strided.
@@ -1826,8 +1848,14 @@ __device__ __forceinline__ void row_dot_40_sub8(const uint8_t* row, const block_
 #pragma unroll
     for (int c = 0; c < NC; ++c) {
         if (EXACT_N || c < n) {
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+            s[c] += gfx906_xor4(s[c]);
+            s[c] += gfx906_xor2(s[c]);
+            s[c] += gfx906_xor1(s[c]);
+#else
 #pragma unroll
             for (int o = 4; o > 0; o >>= 1) s[c] += __shfl_xor_sync(0xffffffffu, s[c], o);
+#endif
         }
     }
 }
@@ -1873,8 +1901,14 @@ __device__ __forceinline__ void row_dot_20_sub8(const uint8_t* row, const block_
     for (int c = 0; c < NC; ++c) {
         if (EXACT_N || c < n) {
             s[c] = __fadd_rn(__fadd_rn(s[c], s16[c]), __fadd_rn(s8[c], 0.0f));
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+            s[c] += gfx906_xor4(s[c]);
+            s[c] += gfx906_xor2(s[c]);
+            s[c] += gfx906_xor1(s[c]);
+#else
 #pragma unroll
             for (int o = 4; o > 0; o >>= 1) s[c] += __shfl_xor_sync(0xffffffffu, s[c], o);
+#endif
         }
     }
 }
@@ -1982,8 +2016,14 @@ __device__ __forceinline__ void row_dot_160_sub8(const uint8_t* row, const block
     for (int c = 0; c < NC; ++c) {
         if (EXACT_N || c < n) {
             s[c] = __fadd_rn(__fadd_rn(p[0][c], p[2][c]), __fadd_rn(p[1][c], p[3][c]));
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+            s[c] += gfx906_xor4(s[c]);
+            s[c] += gfx906_xor2(s[c]);
+            s[c] += gfx906_xor1(s[c]);
+#else
 #pragma unroll
             for (int o = 4; o > 0; o >>= 1) s[c] += __shfl_xor_sync(0xffffffffu, s[c], o);
+#endif
         }
     }
 }
@@ -2028,11 +2068,18 @@ __device__ __forceinline__ void row_dot2_80_sub16(const uint8_t* ra, const uint8
         if (EXACT_N || c < n) {
             sa[c] = __fadd_rn(sa[c], a16[c]);
             sb[c] = __fadd_rn(sb[c], b16[c]);
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+            sa[c] += gfx906_xor8(sa[c]); sb[c] += gfx906_xor8(sb[c]);
+            sa[c] += gfx906_xor4(sa[c]); sb[c] += gfx906_xor4(sb[c]);
+            sa[c] += gfx906_xor2(sa[c]); sb[c] += gfx906_xor2(sb[c]);
+            sa[c] += gfx906_xor1(sa[c]); sb[c] += gfx906_xor1(sb[c]);
+#else
 #pragma unroll
             for (int o = 8; o > 0; o >>= 1) {
                 sa[c] += __shfl_xor_sync(0xffffffffu, sa[c], o);
                 sb[c] += __shfl_xor_sync(0xffffffffu, sb[c], o);
             }
+#endif
         }
     }
 }
@@ -6505,8 +6552,13 @@ __global__ void __launch_bounds__(256) native_gu_lds_kernel(const unsigned long 
 
 // ---- 7 (down): the group's q8_1 h rows in LDS, the tokens inside the k loop, the R2 row pairs of mode 2 -
 // the same per-(row, entry) sums in the same order: bitwise the mode-2 output.
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+template<int TD, int MINW = ((TD == 12 || TD == 18 || TD == 20 || TD == 21 || TD == 23 || TD == 42) ? 2 : 1)>
+__global__ void __launch_bounds__(256, MINW) native_down_lds_kernel(const unsigned long long* __restrict__ grp_ptr,
+#else
 template<int TD>
 __global__ void __launch_bounds__(256) native_down_lds_kernel(const unsigned long long* __restrict__ grp_ptr,
+#endif
                                                               const int32_t* __restrict__ grp_start,
                                                               const int32_t* __restrict__ n_groups,
                                                               const int32_t* __restrict__ ent_dst,
@@ -6910,11 +6962,19 @@ __global__ void __launch_bounds__(256) native_gu_fused_kernel(const unsigned lon
             const float xi = __fmul_rn(gg / (1.0f + __expf(-gg)), uu);
 #endif
             float amax = fabsf(xi), sum = xi;
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+            amax = fmaxf(amax, gfx906_xor16(amax)); sum += gfx906_xor16(sum);
+            amax = fmaxf(amax, gfx906_xor8(amax));  sum += gfx906_xor8(sum);
+            amax = fmaxf(amax, gfx906_xor4(amax));  sum += gfx906_xor4(sum);
+            amax = fmaxf(amax, gfx906_xor2(amax));  sum += gfx906_xor2(sum);
+            amax = fmaxf(amax, gfx906_xor1(amax));  sum += gfx906_xor1(sum);
+#else
 #pragma unroll
             for (int o = 16; o > 0; o >>= 1) {
                 amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
                 sum += __shfl_xor_sync(0xffffffffu, sum, o);
             }
+#endif
             const float d = q8_1_finite(amax / 127.0f);   // #606, as q8_1_store: finite blocks bit for bit
             const int8_t q = q8_1_quant(xi, d, amax);
             block_q8_1* y = hq + (size_t) (c0 + warp) * hb + blockIdx.x;

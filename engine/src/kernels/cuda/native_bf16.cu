@@ -121,7 +121,12 @@ __global__ void bf16_f32_mmvf_kernel(const float* __restrict__ x, const uint16_t
 // token keeps its own accumulator with exactly the single-row kernel's order (pairs, two ordered FMAs, the same warp
 // and block reductions), so each output is bit-identical to a bf16_f32_mmvf_kernel launch of its own.
 template <int BLOCK_SIZE, int NT, bool EXACT_T = true>
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+__global__ void __launch_bounds__(BLOCK_SIZE, (NT >= 8 ? 2 : 4))
+bf16_f32_mmvf_multi_kernel(const float* x_, int64_t ldx, const uint16_t* __restrict__ w,
+#else
 __global__ void bf16_f32_mmvf_multi_kernel(const float* x_, int64_t ldx, const uint16_t* __restrict__ w,
+#endif
                                           float* y_, int64_t ldy, int n_in, int n_tok, int fast) {
     const float* STRATA_PDL_RESTRICT x = x_;   // __restrict__ below sm_70 only (pdl.hpp, #1469)
     float* STRATA_PDL_RESTRICT y = y_;
@@ -228,7 +233,12 @@ __global__ void bf16_f32_mmvf_multi_kernel(const float* x_, int64_t ldx, const u
 // S26 STRATA_LFUSE=1 (AUX): one more block computes row 0 of w_aux into y_aux[k * ldy_aux] - the same per-output
 // code, so each aux output is bitwise what its own bf16_f32_mmvf_multi_kernel launch gave (the shared expert's gate)
 template <int BLOCK_SIZE, int NT, int RPB, bool TS = false, bool AUX = false>
+#if defined(STRATA_HIP_GFX906) || defined(__gfx906__)
+__global__ void __launch_bounds__(BLOCK_SIZE, (NT >= 8 ? 1 : 4))
+bf16_f32_mmvf_rows_kernel(const float* __restrict__ x, int64_t ldx, const uint16_t* __restrict__ w,
+#else
 __global__ void bf16_f32_mmvf_rows_kernel(const float* __restrict__ x, int64_t ldx, const uint16_t* __restrict__ w,
+#endif
                                           float* __restrict__ y, int64_t ldy, int n_in, int n_out, int n_tok,
                                           const uint16_t* __restrict__ w_aux = nullptr, float* __restrict__ y_aux = nullptr,
                                           int64_t ldy_aux = 0) {
